@@ -1,0 +1,1076 @@
+Index: src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/nexus3/Nexus3RestApiSearchService.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/nexus3/Nexus3RestApiSearchService.java	(revision 4998e97d4a49ddb4700c6dc0d95927c72017784a)
++++ src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/nexus3/Nexus3RestApiSearchService.java	(date 1589744294620)
+@@ -1,25 +1,24 @@
+ package org.jenkinsci.plugins.maven_artifact_choicelistprovider.nexus3;
+ 
++import com.fasterxml.jackson.core.JsonParseException;
++import com.fasterxml.jackson.databind.JsonMappingException;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import com.sun.jersey.api.client.WebResource;
++import org.apache.commons.lang.StringUtils;
++import org.jenkinsci.plugins.maven_artifact_choicelistprovider.AbstractRESTfulVersionReader;
++import org.jenkinsci.plugins.maven_artifact_choicelistprovider.IVersionReader;
++import org.jenkinsci.plugins.maven_artifact_choicelistprovider.ValidAndInvalidClassifier;
++
++import javax.ws.rs.core.MediaType;
++import javax.ws.rs.core.MultivaluedMap;
+ import java.io.IOException;
+ import java.util.LinkedHashSet;
+ import java.util.Set;
+ import java.util.TreeSet;
+ import java.util.logging.Level;
+ import java.util.logging.Logger;
+-
+-import javax.ws.rs.core.MediaType;
+-import javax.ws.rs.core.MultivaluedMap;
+-
+-import org.apache.commons.lang.StringUtils;
+-import org.jenkinsci.plugins.maven_artifact_choicelistprovider.AbstractRESTfulVersionReader;
+-import org.jenkinsci.plugins.maven_artifact_choicelistprovider.IVersionReader;
+-import org.jenkinsci.plugins.maven_artifact_choicelistprovider.ValidAndInvalidClassifier;
+-
+-import com.fasterxml.jackson.core.JsonParseException;
+-import com.fasterxml.jackson.databind.JsonMappingException;
+-import com.fasterxml.jackson.databind.ObjectMapper;
+-import com.sun.jersey.api.client.WebResource;
+-
++import java.util.regex.Matcher;
++import java.util.regex.Pattern;
+ 
+ public class Nexus3RestApiSearchService extends AbstractRESTfulVersionReader implements IVersionReader {
+ 
+@@ -27,13 +26,14 @@
+ 
+     private static final Logger LOGGER = Logger.getLogger(Nexus3RestApiSearchService.class.getName());
+ 
++    private final Pattern lastDirPattern = Pattern.compile(".*/([^/]+)/[^/]+");
+     public Nexus3RestApiSearchService(String pURL) {
+         super(pURL);
+     }
+ 
+     @Override
+     public Set<String> callService(final String pRepositoryId, final String pGroupId, final String pArtifactId, final String pPackaging,
+-            final ValidAndInvalidClassifier pClassifier) {
++            final ValidAndInvalidClassifier pClassifier, final boolean includeRawAssets) {
+ 
+         // init empty
+         Set<String> retVal = new TreeSet<>();
+@@ -62,7 +62,7 @@
+                     // So we get the token from the request which should be null.
+                     token = parsedJsonResult.getContinuationToken();
+                 } else {
+-                    Set<String> currentResult = parseResponse(parsedJsonResult);
++                    Set<String> currentResult = parseResponse(parsedJsonResult, includeRawAssets);
+                     retVal.addAll(currentResult);
+                     
+                     // control the loop and maybe query again
+@@ -89,12 +89,20 @@
+      *            the JSON response of the Nexus3 API.
+      * @return a unique list of URLs that are matching the search criteria, sorted by the order of the Nexus3 service.
+      */
+-    Set<String> parseResponse(final Nexus3RestResponse pJsonResult) {
++    Set<String> parseResponse(final Nexus3RestResponse pJsonResult, boolean rawAssets) {
+         // Use a Map instead of a List to filter duplicated entries and also linked to keep the order of XML response
+         final Set<String> retVal = new LinkedHashSet<String>();
+ 
+         for (Item current : pJsonResult.getItems()) {
+-            retVal.add(current.getDownloadUrl());
++            if (rawAssets) {
++                retVal.add(current.getDownloadUrl());
++            } else {
++                Matcher m = lastDirPattern.matcher(current.getDownloadUrl());
++                if (! m.matches() )
++                    continue;
++
++                retVal.add(m.group(1));
++            }
+         }
+         return retVal;
+     }
+Index: src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/central/MavenCentralSearchService.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/central/MavenCentralSearchService.java	(revision 4998e97d4a49ddb4700c6dc0d95927c72017784a)
++++ src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/central/MavenCentralSearchService.java	(date 1589744294609)
+@@ -1,5 +1,11 @@
+ package org.jenkinsci.plugins.maven_artifact_choicelistprovider.central;
+ 
++import org.apache.commons.lang.StringUtils;
++import org.jenkinsci.plugins.maven_artifact_choicelistprovider.IVersionReader;
++import org.jenkinsci.plugins.maven_artifact_choicelistprovider.ValidAndInvalidClassifier;
++import org.jenkinsci.plugins.maven_artifact_choicelistprovider.VersionReaderException;
++
++import javax.servlet.http.HttpServletResponse;
+ import java.io.BufferedReader;
+ import java.io.InputStreamReader;
+ import java.net.HttpURLConnection;
+@@ -12,13 +18,6 @@
+ import java.util.logging.Level;
+ import java.util.logging.Logger;
+ 
+-import javax.servlet.http.HttpServletResponse;
+-import org.apache.commons.lang.StringUtils;
+-
+-import org.jenkinsci.plugins.maven_artifact_choicelistprovider.IVersionReader;
+-import org.jenkinsci.plugins.maven_artifact_choicelistprovider.ValidAndInvalidClassifier;
+-import org.jenkinsci.plugins.maven_artifact_choicelistprovider.VersionReaderException;
+-
+ /**
+  * Maven Central offers a search service located at {@link #REPO_SEARCH_SERVICE_URL} which can be used to query the
+  * maven central repository via a RESTful interface. This class makes use of this API and return a list of artifacts.
+@@ -51,7 +50,7 @@
+ 
+ 	@Override
+ 	public List<String> retrieveVersions(String pRepositoryId, String pGroupId, String pArtifactId, String pPackaging,
+-			ValidAndInvalidClassifier pClassifier) throws VersionReaderException {
++			ValidAndInvalidClassifier pClassifier, boolean includeRawAssets) throws VersionReaderException {
+ 		try {
+ 			final String targetURL = createURL(pGroupId, pArtifactId, pPackaging, pClassifier);
+ 			LOGGER.fine("target url:" + targetURL);
+Index: src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/central/MavenCentralChoiceListProvider.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/central/MavenCentralChoiceListProvider.java	(revision 4998e97d4a49ddb4700c6dc0d95927c72017784a)
++++ src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/central/MavenCentralChoiceListProvider.java	(date 1589744294580)
+@@ -1,16 +1,15 @@
+ package org.jenkinsci.plugins.maven_artifact_choicelistprovider.central;
+ 
+-import java.util.Map;
+-
++import hudson.Extension;
++import hudson.util.FormValidation;
++import jp.ikedam.jenkins.plugins.extensible_choice_parameter.ChoiceListProvider;
+ import org.jenkinsci.plugins.maven_artifact_choicelistprovider.AbstractMavenArtifactChoiceListProvider;
+ import org.jenkinsci.plugins.maven_artifact_choicelistprovider.AbstractMavenArtifactDescriptorImpl;
+ import org.jenkinsci.plugins.maven_artifact_choicelistprovider.IVersionReader;
+ import org.kohsuke.stapler.DataBoundConstructor;
+ import org.kohsuke.stapler.QueryParameter;
+ 
+-import hudson.Extension;
+-import hudson.util.FormValidation;
+-import jp.ikedam.jenkins.plugins.extensible_choice_parameter.ChoiceListProvider;
++import java.util.List;
+ 
+ /**
+  * 
+@@ -43,16 +42,16 @@
+ 
+ 		public FormValidation doTest(@QueryParameter String url, @QueryParameter String groupId,
+ 				@QueryParameter String artifactId, @QueryParameter String packaging, @QueryParameter String classifier,
+-				@QueryParameter boolean reverseOrder) {
++				@QueryParameter boolean reverseOrder, @QueryParameter boolean includeRawAssets) {
+ 			final IVersionReader service = new MavenCentralSearchService();
+-			return super.performTest(service, "", groupId, artifactId, packaging, classifier, reverseOrder);
++			return super.performTest(service, "", groupId, artifactId, packaging, classifier, reverseOrder, includeRawAssets);
+ 		}
+ 
+ 		@Override
+-		protected Map<String, String> wrapTestConnection(IVersionReader service, String pRepositoryId, String pGroupId, String pArtifactId,
+-				String pPackaging, String pClassifier, boolean pReverseOrder) {
++		protected List<String> wrapTestConnection(IVersionReader service, String pRepositoryId, String pGroupId, String pArtifactId,
++												  String pPackaging, String pClassifier, boolean pReverseOrder, boolean includeRawAssets) {
+ 			return readURL(new MavenCentralSearchService(), pRepositoryId, pGroupId, pArtifactId, pPackaging, pClassifier,
+-					pReverseOrder);
++					pReverseOrder, includeRawAssets);
+ 		}
+ 
+ 	}
+Index: src/main/resources/org/jenkinsci/plugins/maven_artifact_choicelistprovider/nexus3/Nexus3ChoiceListProvider/config.jelly
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- src/main/resources/org/jenkinsci/plugins/maven_artifact_choicelistprovider/nexus3/Nexus3ChoiceListProvider/config.jelly	(revision 4998e97d4a49ddb4700c6dc0d95927c72017784a)
++++ src/main/resources/org/jenkinsci/plugins/maven_artifact_choicelistprovider/nexus3/Nexus3ChoiceListProvider/config.jelly	(date 1589682371619)
+@@ -47,11 +47,14 @@
+      <f:entry title="${%Reverse Order}" field="reverseOrder">
+         <f:checkbox />
+     </f:entry>
+-    
++    <f:entry title="${%Include Raw Artifacts}" field="includeRawAssets">
++            <f:checkbox />
++        </f:entry>
++
+     <f:validateButton
+         method="test"
+         title="${%List Files Now}"
+         progress="${%Checking...}"
+-        with="url,credentialsId,repositoryId,groupId,artifactId,packaging,classifier,reverseOrder"
++        with="url,credentialsId,repositoryId,groupId,artifactId,packaging,classifier,reverseOrder,includeRawAssets"
+     />
+ </j:jelly>
+Index: src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/nexus3/Nexus3ChoiceListProvider.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/nexus3/Nexus3ChoiceListProvider.java	(revision 4998e97d4a49ddb4700c6dc0d95927c72017784a)
++++ src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/nexus3/Nexus3ChoiceListProvider.java	(date 1589744294591)
+@@ -1,26 +1,10 @@
+ package org.jenkinsci.plugins.maven_artifact_choicelistprovider.nexus3;
+ 
+-import java.util.Collections;
+-import java.util.Map;
+-
+-import javax.ws.rs.POST;
+-
+-import org.apache.commons.lang.StringUtils;
+-import org.jenkinsci.plugins.maven_artifact_choicelistprovider.AbstractMavenArtifactChoiceListProvider;
+-import org.jenkinsci.plugins.maven_artifact_choicelistprovider.AbstractMavenArtifactDescriptorImpl;
+-import org.jenkinsci.plugins.maven_artifact_choicelistprovider.IVersionReader;
+-import org.kohsuke.stapler.AncestorInPath;
+-import org.kohsuke.stapler.DataBoundConstructor;
+-import org.kohsuke.stapler.DataBoundSetter;
+-import org.kohsuke.stapler.QueryParameter;
+-import org.kohsuke.stapler.StaplerRequest;
+-
+ import com.cloudbees.plugins.credentials.CredentialsMatchers;
+ import com.cloudbees.plugins.credentials.common.StandardListBoxModel;
+ import com.cloudbees.plugins.credentials.common.StandardUsernamePasswordCredentials;
+ import com.cloudbees.plugins.credentials.domains.DomainRequirement;
+ import com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl;
+-
+ import hudson.Extension;
+ import hudson.model.Item;
+ import hudson.model.Job;
+@@ -28,6 +12,15 @@
+ import hudson.util.FormValidation;
+ import hudson.util.ListBoxModel;
+ import net.sf.json.JSONObject;
++import org.apache.commons.lang.StringUtils;
++import org.jenkinsci.plugins.maven_artifact_choicelistprovider.AbstractMavenArtifactChoiceListProvider;
++import org.jenkinsci.plugins.maven_artifact_choicelistprovider.AbstractMavenArtifactDescriptorImpl;
++import org.jenkinsci.plugins.maven_artifact_choicelistprovider.IVersionReader;
++import org.kohsuke.stapler.*;
++
++import javax.ws.rs.POST;
++import java.util.Collections;
++import java.util.List;
+ 
+ public class Nexus3ChoiceListProvider extends AbstractMavenArtifactChoiceListProvider {
+ 
+@@ -77,7 +70,7 @@
+         @POST
+         public FormValidation doTest(@AncestorInPath Item pItem, @QueryParameter String url, @QueryParameter String credentialsId, @QueryParameter String repositoryId,
+                 @QueryParameter String groupId, @QueryParameter String artifactId, @QueryParameter String packaging, @QueryParameter String classifier,
+-                @QueryParameter boolean reverseOrder) {
++                @QueryParameter boolean reverseOrder, @QueryParameter boolean includeRawAssets) {
+ 
+             // SECURITY-1022
+             pItem.checkPermission(Job.CONFIGURE);
+@@ -89,13 +82,13 @@
+             if (c != null) {
+                 service.setCredentials(c.getUsername(), c.getPassword().getPlainText());
+             }
+-            return super.performTest(service, repositoryId, groupId, artifactId, packaging, classifier, reverseOrder);
++            return super.performTest(service, repositoryId, groupId, artifactId, packaging, classifier, reverseOrder, includeRawAssets);
+         }
+ 
+         @Override
+-        protected Map<String, String> wrapTestConnection(IVersionReader pService, String pRepositoryId, String pGroupId, String pArtifactId, String pPackaging, String pClassifier,
+-                boolean pReverseOrder) {
+-            return readURL(pService, pRepositoryId, pGroupId, pArtifactId, pPackaging, pClassifier, pReverseOrder);
++        protected List<String> wrapTestConnection(IVersionReader pService, String pRepositoryId, String pGroupId, String pArtifactId, String pPackaging, String pClassifier,
++                                                  boolean pReverseOrder, boolean includeRawAssets) {
++            return readURL(pService, pRepositoryId, pGroupId, pArtifactId, pPackaging, pClassifier, pReverseOrder, includeRawAssets);
+         }
+ 
+         public FormValidation doCheckUrl(@QueryParameter String url) {
+Index: src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/artifactory/ArtifactoryChoiceListProvider.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/artifactory/ArtifactoryChoiceListProvider.java	(revision 4998e97d4a49ddb4700c6dc0d95927c72017784a)
++++ src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/artifactory/ArtifactoryChoiceListProvider.java	(date 1589744294635)
+@@ -1,32 +1,28 @@
+ package org.jenkinsci.plugins.maven_artifact_choicelistprovider.artifactory;
+ 
+-import java.util.Collections;
+-import java.util.Map;
+-
+-import javax.ws.rs.POST;
+-
+-import org.apache.commons.lang.StringUtils;
+-import org.jenkinsci.plugins.maven_artifact_choicelistprovider.AbstractMavenArtifactChoiceListProvider;
+-import org.jenkinsci.plugins.maven_artifact_choicelistprovider.AbstractMavenArtifactDescriptorImpl;
+-import org.jenkinsci.plugins.maven_artifact_choicelistprovider.IVersionReader;
+-import org.kohsuke.stapler.AncestorInPath;
+-import org.kohsuke.stapler.DataBoundConstructor;
+-import org.kohsuke.stapler.DataBoundSetter;
+-import org.kohsuke.stapler.QueryParameter;
+-
+ import com.cloudbees.plugins.credentials.CredentialsMatchers;
+ import com.cloudbees.plugins.credentials.common.StandardListBoxModel;
+ import com.cloudbees.plugins.credentials.common.StandardUsernamePasswordCredentials;
+ import com.cloudbees.plugins.credentials.domains.DomainRequirement;
+ import com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl;
+-
+ import hudson.Extension;
+ import hudson.model.Item;
+ import hudson.model.Job;
+ import hudson.security.ACL;
+ import hudson.util.FormValidation;
+ import hudson.util.ListBoxModel;
+-import jenkins.model.Jenkins;
++import org.apache.commons.lang.StringUtils;
++import org.jenkinsci.plugins.maven_artifact_choicelistprovider.AbstractMavenArtifactChoiceListProvider;
++import org.jenkinsci.plugins.maven_artifact_choicelistprovider.AbstractMavenArtifactDescriptorImpl;
++import org.jenkinsci.plugins.maven_artifact_choicelistprovider.IVersionReader;
++import org.kohsuke.stapler.AncestorInPath;
++import org.kohsuke.stapler.DataBoundConstructor;
++import org.kohsuke.stapler.DataBoundSetter;
++import org.kohsuke.stapler.QueryParameter;
++
++import javax.ws.rs.POST;
++import java.util.Collections;
++import java.util.List;
+ 
+ public class ArtifactoryChoiceListProvider extends AbstractMavenArtifactChoiceListProvider {
+ 
+@@ -70,7 +66,7 @@
+ 
+         @POST
+         public FormValidation doTest(@AncestorInPath Item pItem, @QueryParameter String url, @QueryParameter String credentialsId, @QueryParameter String groupId,
+-                @QueryParameter String artifactId, @QueryParameter String packaging, @QueryParameter String classifier, @QueryParameter boolean reverseOrder) {
++                @QueryParameter String artifactId, @QueryParameter String packaging, @QueryParameter String classifier, @QueryParameter boolean reverseOrder, @QueryParameter boolean includeRawAssets) {
+ 
+             // SECURITY-1022
+             pItem.checkPermission(Job.CONFIGURE);
+@@ -82,13 +78,13 @@
+             if (c != null) {
+                 service.setCredentials(c.getUsername(), c.getPassword().getPlainText());
+             }
+-            return super.performTest(service, "", groupId, artifactId, packaging, classifier, reverseOrder);
++            return super.performTest(service, "", groupId, artifactId, packaging, classifier, reverseOrder, includeRawAssets);
+         }
+ 
+         @Override
+-        protected Map<String, String> wrapTestConnection(IVersionReader pService, String pRepositoryId, String pGroupId, String pArtifactId, String pPackaging, String pClassifier,
+-                boolean pReverseOrder) {
+-            return readURL(pService, pRepositoryId, pGroupId, pArtifactId, pPackaging, pClassifier, pReverseOrder);
++        protected List<String> wrapTestConnection(IVersionReader pService, String pRepositoryId, String pGroupId, String pArtifactId, String pPackaging, String pClassifier,
++                                                  boolean pReverseOrder, boolean includeRawAssets) {
++            return readURL(pService, pRepositoryId, pGroupId, pArtifactId, pPackaging, pClassifier, pReverseOrder, includeRawAssets);
+         }
+ 
+         public FormValidation doCheckUrl(@QueryParameter String url) {
+Index: src/test/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/artifactory/ArtifactorySearchServiceTest.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- src/test/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/artifactory/ArtifactorySearchServiceTest.java	(revision 4998e97d4a49ddb4700c6dc0d95927c72017784a)
++++ src/test/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/artifactory/ArtifactorySearchServiceTest.java	(date 1589744294624)
+@@ -1,14 +1,13 @@
+ package org.jenkinsci.plugins.maven_artifact_choicelistprovider.artifactory;
+ 
+-import java.util.List;
+-import java.util.Set;
+-
++import junit.framework.TestCase;
+ import org.jenkinsci.plugins.maven_artifact_choicelistprovider.ValidAndInvalidClassifier;
+ import org.jenkinsci.plugins.maven_artifact_choicelistprovider.VersionReaderException;
+ import org.junit.After;
+ import org.junit.Test;
+ 
+-import junit.framework.TestCase;
++import java.util.List;
++import java.util.Set;
+ 
+ public class ArtifactorySearchServiceTest extends TestCase {
+ 
+@@ -21,7 +20,7 @@
+ 	public void testWithoutExplicitQualifier() throws VersionReaderException {
+ 		ArtifactorySearchService s = new ArtifactorySearchService("https://repo.jenkins-ci.org/");
+ 		List<String> retrieveVersions = s.retrieveVersions("", "org.jenkins-ci.plugins",
+-				"maven-artifact-choicelistprovider", "", ValidAndInvalidClassifier.getDefault());
++				"maven-artifact-choicelistprovider", "", ValidAndInvalidClassifier.getDefault(), true);
+ 		for (String current : retrieveVersions) {
+ 			System.out.println(current);
+ 		}
+@@ -31,7 +30,7 @@
+ 	public void testWithExplicitQualifier() throws VersionReaderException {
+ 		ArtifactorySearchService s = new ArtifactorySearchService("https://repo.jenkins-ci.org/");
+ 		List<String> retrieveVersions = s.retrieveVersions("", "org.jenkins-ci.plugins",
+-				"maven-artifact-choicelistprovider", "", ValidAndInvalidClassifier.fromString("sources"));
++				"maven-artifact-choicelistprovider", "", ValidAndInvalidClassifier.fromString("sources"), true);
+ 		for (String current : retrieveVersions) {
+ 			System.out.println(current);
+ 		}
+@@ -41,7 +40,7 @@
+ 	public void testWithPackaging() throws VersionReaderException {
+ 		ArtifactorySearchService s = new ArtifactorySearchService("https://repo.jenkins-ci.org/");
+ 		List<String> retrieveVersions = s.retrieveVersions("", "org.jenkins-ci.plugins",
+-				"maven-artifact-choicelistprovider", "hpi", ValidAndInvalidClassifier.getDefault());
++				"maven-artifact-choicelistprovider", "hpi", ValidAndInvalidClassifier.getDefault(), true);
+ 		for (String current : retrieveVersions) {
+ 			assertTrue("must return an artifact URL for hpi files: " + current, current.endsWith("hpi"));
+ 		}
+Index: src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/artifactory/ArtifactorySearchService.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/artifactory/ArtifactorySearchService.java	(revision 4998e97d4a49ddb4700c6dc0d95927c72017784a)
++++ src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/artifactory/ArtifactorySearchService.java	(date 1589744294616)
+@@ -1,21 +1,19 @@
+ package org.jenkinsci.plugins.maven_artifact_choicelistprovider.artifactory;
+ 
+-import java.util.LinkedHashSet;
+-import java.util.Set;
+-import java.util.logging.Level;
+-import java.util.logging.Logger;
+-
+-import javax.ws.rs.core.MediaType;
+-import javax.ws.rs.core.MultivaluedMap;
+-
++import com.google.gson.Gson;
++import com.google.gson.annotations.SerializedName;
+ import org.apache.commons.lang.StringUtils;
+ import org.jenkinsci.plugins.maven_artifact_choicelistprovider.AbstractRESTfulVersionReader;
+ import org.jenkinsci.plugins.maven_artifact_choicelistprovider.IVersionReader;
+ import org.jenkinsci.plugins.maven_artifact_choicelistprovider.ValidAndInvalidClassifier;
+ import org.jenkinsci.plugins.maven_artifact_choicelistprovider.nexus.StandardRESTfulParameterBuilder;
+ 
+-import com.google.gson.Gson;
+-import com.google.gson.annotations.SerializedName;
++import javax.ws.rs.core.MediaType;
++import javax.ws.rs.core.MultivaluedMap;
++import java.util.LinkedHashSet;
++import java.util.Set;
++import java.util.logging.Level;
++import java.util.logging.Logger;
+ 
+ /**
+  * 
+@@ -41,7 +39,7 @@
+     }
+ 
+     @Override
+-    public Set<String> callService(String pRepositoryId, String pGroupId, String pArtifactId, String pPackaging, ValidAndInvalidClassifier pClassifier) {
++    public Set<String> callService(String pRepositoryId, String pGroupId, String pArtifactId, String pPackaging, ValidAndInvalidClassifier pClassifier, boolean includeRawAssets) {
+         final MultivaluedMap<String, String> requestParams = new StandardRESTfulParameterBuilder().create("", pGroupId, pArtifactId, pPackaging, pClassifier);
+ 
+         Set<String> retVal = new LinkedHashSet<String>();
+Index: src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/AbstractMavenArtifactChoiceListProvider.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/AbstractMavenArtifactChoiceListProvider.java	(revision 4998e97d4a49ddb4700c6dc0d95927c72017784a)
++++ src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/AbstractMavenArtifactChoiceListProvider.java	(date 1589744294599)
+@@ -1,31 +1,31 @@
+ package org.jenkinsci.plugins.maven_artifact_choicelistprovider;
+ 
+-import java.util.ArrayList;
+-import java.util.Collections;
+-import java.util.LinkedHashMap;
+-import java.util.List;
+-import java.util.Map;
+-import java.util.logging.Level;
+-import java.util.logging.Logger;
+-
+-import org.apache.commons.lang.StringUtils;
+-import org.jenkinsci.plugins.maven_artifact_choicelistprovider.artifactory.ArtifactoryChoiceListProvider;
+-import org.jenkinsci.plugins.maven_artifact_choicelistprovider.central.MavenCentralChoiceListProvider;
+-import org.jenkinsci.plugins.maven_artifact_choicelistprovider.nexus.NexusChoiceListProvider;
+-import org.kohsuke.stapler.DataBoundSetter;
+-
+ import com.cloudbees.plugins.credentials.CredentialsMatchers;
+ import com.cloudbees.plugins.credentials.CredentialsProvider;
+ import com.cloudbees.plugins.credentials.domains.DomainRequirement;
+ import com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl;
+-
+ import hudson.ExtensionPoint;
+ import hudson.model.AbstractBuild;
+ import hudson.model.AbstractProject;
+ import hudson.security.ACL;
++import hudson.util.VersionNumber;
+ import jenkins.model.Jenkins;
+ import jp.ikedam.jenkins.plugins.extensible_choice_parameter.ChoiceListProvider;
+ import jp.ikedam.jenkins.plugins.extensible_choice_parameter.ExtensibleChoiceParameterDefinition;
++import org.apache.commons.lang.StringUtils;
++import org.jenkinsci.plugins.maven_artifact_choicelistprovider.artifactory.ArtifactoryChoiceListProvider;
++import org.jenkinsci.plugins.maven_artifact_choicelistprovider.central.MavenCentralChoiceListProvider;
++import org.jenkinsci.plugins.maven_artifact_choicelistprovider.nexus.NexusChoiceListProvider;
++import org.kohsuke.stapler.DataBoundSetter;
++
++import java.util.Collections;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.logging.Level;
++import java.util.logging.Logger;
++
++import static java.util.stream.Collectors.toList;
+ 
+ /**
+  * 
+@@ -46,6 +46,7 @@
+     private String packaging;
+     private String classifier;
+     private boolean reverseOrder;
++    private boolean includeRawAssets = true;
+ 
+     /**
+      * Initializes the choicelist with at the artifactId.
+@@ -62,10 +63,12 @@
+     public List<String> getChoiceList() {
+ 
+         LOGGER.log(Level.FINE, "retrieve the versions from the repository");
+-        final Map<String, String> mChoices = readURL(createServiceInstance(), getRepositoryId(), getGroupId(), getArtifactId(), getPackaging(), getClassifier(), getReverseOrder());
++        final List<String> mChoices = readURL(createServiceInstance(), getRepositoryId(), getGroupId(), getArtifactId(), getPackaging(), getClassifier(), getReverseOrder(), isIncludeRawAssets());
+         // FIXME: CHANGE-1: Return only the keys, that are shorter then the values
+         // return new ArrayList<String>(mChoices.keySet());
+-        return new ArrayList<String>(mChoices.values());
++        //return new ArrayList<String>(mChoices.values());
++
++        return mChoices;
+     }
+ 
+     /**
+@@ -107,24 +110,36 @@
+      *            <code>true</code> if the result should be reversed.
+      * @return never null
+      */
+-    public static Map<String, String> readURL(final IVersionReader pInstance, final String pRepositoryId, final String pGroupId, final String pArtifactId, final String pPackaging,
+-            String pClassifier, final boolean pReverseOrder) {
+-        Map<String, String> retVal = new LinkedHashMap<String, String>();
++    public static List<String> readURL(final IVersionReader pInstance, final String pRepositoryId, final String pGroupId, final String pArtifactId, final String pPackaging,
++            String pClassifier, final boolean pReverseOrder, boolean includeRawAssets) {
++        List<String> retVal = null;
+         try {
+             ValidAndInvalidClassifier classifierBox = ValidAndInvalidClassifier.fromString(pClassifier);
+ 
+-            List<String> choices = pInstance.retrieveVersions(pRepositoryId, pGroupId, pArtifactId, pPackaging, classifierBox);
++            List<String> choices = pInstance.retrieveVersions(pRepositoryId, pGroupId, pArtifactId, pPackaging, classifierBox, includeRawAssets);
++            if (!includeRawAssets) {
++                // parse with maven version parser
++                List<VersionNumber> versionNumbers = choices.stream()
++                        .map(VersionNumber::new).collect(toList());
++                versionNumbers.addAll(
++                        choices.stream()
++                            .map(v->new VersionNumber(v+"-SNAPSHOT")).collect(toList()));
++                Collections.sort(versionNumbers);
++                choices = versionNumbers.stream()
++                        .map(v->v.toString()).collect(toList());
++            }
+ 
+             if (pReverseOrder)
+                 Collections.reverse(choices);
+ 
+-            retVal = toMap(choices);
++            //retVal = toMap(choices);
++            retVal = choices;
+         } catch (VersionReaderException e) {
+             LOGGER.log(Level.INFO, "failed to retrieve versions from repository for g:" + pGroupId + ", a:" + pArtifactId + ", p:" + pPackaging + ", c:" + pClassifier, e);
+-            retVal.put("error", e.getMessage());
++            //retVal.put("error", e.getMessage());
+         } catch (Exception e) {
+             LOGGER.log(Level.WARNING, "failed to retrieve versions from nexus for g:" + pGroupId + ", a:" + pArtifactId + ", p:" + pPackaging + ", c:" + pClassifier, e);
+-            retVal.put("error", "Unexpected Error: " + e.getMessage());
++            //retVal.put("error", "Unexpected Error: " + e.getMessage());
+         }
+         return retVal;
+     }
+@@ -181,6 +196,9 @@
+         this.reverseOrder = reverseOrder;
+     }
+ 
++    @DataBoundSetter
++    public void setIncludeRawAssets(boolean includeRawAssets) { this.includeRawAssets = includeRawAssets; }
++
+     @DataBoundSetter
+     public void setRepositoryId(String repositoryId) {
+         this.repositoryId = repositoryId;
+@@ -206,6 +224,10 @@
+         return reverseOrder;
+     }
+ 
++    public boolean isIncludeRawAssets() {
++        return this.includeRawAssets;
++    }
++
+     public String getRepositoryId() {
+         return repositoryId;
+     }
+Index: src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/IVersionReader.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/IVersionReader.java	(revision 4998e97d4a49ddb4700c6dc0d95927c72017784a)
++++ src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/IVersionReader.java	(date 1589681532677)
+@@ -5,7 +5,7 @@
+ public interface IVersionReader {
+ 
+ 	public List<String> retrieveVersions(String pRepositoryId, String pGroupId, String pArtifactId, String pPackaging,
+-			ValidAndInvalidClassifier pAcceptedClassifier) throws VersionReaderException;
++			ValidAndInvalidClassifier pAcceptedClassifier, boolean includeRawAssets) throws VersionReaderException;
+ 
+ 	public void setUserName(final String pUserName);
+ 
+Index: src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/AbstractRESTfulVersionReader.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/AbstractRESTfulVersionReader.java	(revision 4998e97d4a49ddb4700c6dc0d95927c72017784a)
++++ src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/AbstractRESTfulVersionReader.java	(date 1589744294631)
+@@ -1,21 +1,19 @@
+ package org.jenkinsci.plugins.maven_artifact_choicelistprovider;
+ 
+-import java.util.ArrayList;
+-import java.util.List;
+-import java.util.Set;
+-import java.util.logging.Level;
+-import java.util.logging.Logger;
+-
+-import javax.ws.rs.core.UriBuilder;
+-
+-import org.apache.commons.lang.StringUtils;
+-
+ import com.sun.jersey.api.client.Client;
+ import com.sun.jersey.api.client.UniformInterfaceException;
+ import com.sun.jersey.api.client.WebResource;
+ import com.sun.jersey.api.client.config.ClientConfig;
+ import com.sun.jersey.api.client.config.DefaultClientConfig;
+ import com.sun.jersey.api.client.filter.HTTPBasicAuthFilter;
++import org.apache.commons.lang.StringUtils;
++
++import javax.ws.rs.core.UriBuilder;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Set;
++import java.util.logging.Level;
++import java.util.logging.Logger;
+ 
+ /**
+  * 
+@@ -65,9 +63,9 @@
+ 	}
+ 
+ 	public List<String> retrieveVersions(String pRepositoryId, String pGroupId, String pArtifactId, String pPackaging,
+-			ValidAndInvalidClassifier pClassifier) throws VersionReaderException {
++			ValidAndInvalidClassifier pClassifier, boolean includeRawAssets) throws VersionReaderException {
+ 		try {
+-			final Set<String> result = callService(pRepositoryId, pGroupId, pArtifactId, pPackaging, pClassifier);
++			final Set<String> result = callService(pRepositoryId, pGroupId, pArtifactId, pPackaging, pClassifier, includeRawAssets);
+ 			if(LOGGER.isLoggable(Level.FINE)) {
+ 				LOGGER.log(Level.FINE, "result: " + result.size());
+ 				for(String current : result) {
+@@ -153,5 +151,5 @@
+ 	public abstract String getRESTfulServiceEndpoint();
+ 
+ 	public abstract Set<String> callService(final String pRepositoryId, final String pGroupId, final String pArtifactId, final String pPackaging,
+-			final ValidAndInvalidClassifier pClassifier);
++			final ValidAndInvalidClassifier pClassifier, boolean includeRawAssets);
+ }
+Index: src/test/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/nexus/NexusLuceneSearchServiceTest.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- src/test/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/nexus/NexusLuceneSearchServiceTest.java	(revision 4998e97d4a49ddb4700c6dc0d95927c72017784a)
++++ src/test/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/nexus/NexusLuceneSearchServiceTest.java	(date 1589744294586)
+@@ -1,15 +1,14 @@
+ package org.jenkinsci.plugins.maven_artifact_choicelistprovider.nexus;
+ 
+-import static org.junit.Assert.*;
+-
+-import java.util.List;
+-
+ import org.jenkinsci.plugins.maven_artifact_choicelistprovider.ValidAndInvalidClassifier;
+ import org.jenkinsci.plugins.maven_artifact_choicelistprovider.VersionReaderException;
+-import org.jenkinsci.plugins.maven_artifact_choicelistprovider.nexus.NexusLuceneSearchService;
+ import org.junit.After;
+ import org.junit.Test;
+ 
++import java.util.List;
++
++import static org.junit.Assert.*;
++
+ /**
+  * 
+  * Integration Test that verifies the retrieval works as expected. Don't forget to set a proxy, if you are using one.
+@@ -30,7 +29,7 @@
+ 		NexusLuceneSearchService s = new NexusLuceneSearchService(null);
+ 
+ 		try {
+-			s.retrieveVersions(null, null, null, null, null);
++			s.retrieveVersions(null, null, null, null, null, true);
+ 			fail("shouldn work");
+ 		} catch (VersionReaderException e) {
+ 			// expected
+@@ -43,7 +42,7 @@
+ 	public void testWithoutExplicitQualifier() throws VersionReaderException {
+ 		NexusLuceneSearchService s = new NexusLuceneSearchService("https://artifacts.alfresco.com/nexus/");
+ 		List<String> retrieveVersions = s.retrieveVersions("", "org.apache.tomcat", "tomcat", "",
+-				ValidAndInvalidClassifier.getDefault());
++				ValidAndInvalidClassifier.getDefault(), true);
+ 		for (String current : retrieveVersions) {
+ 			System.out.println(current);
+ 		}
+@@ -53,7 +52,7 @@
+ 	public void testWithQualifier() throws VersionReaderException {
+ 		NexusLuceneSearchService s = new NexusLuceneSearchService("https://artifacts.alfresco.com/nexus/");
+ 		List<String> retrieveVersions = s.retrieveVersions("", "org.apache.tomcat", "tomcat", "tgz",
+-				ValidAndInvalidClassifier.fromString("linux"));
++				ValidAndInvalidClassifier.fromString("linux"), true);
+ 		for (String current : retrieveVersions) {
+ 			System.out.println(current);
+ 			assertTrue(current.contains("tgz"));
+@@ -65,7 +64,7 @@
+ 	public void testWithNegativeQualifier() throws VersionReaderException {
+ 		NexusLuceneSearchService s = new NexusLuceneSearchService("https://artifacts.alfresco.com/nexus/");
+ 		List<String> retrieveVersions = s.retrieveVersions("", "org.apache.tomcat", "tomcat", "tgz",
+-				ValidAndInvalidClassifier.fromString("!linux,!osx"));
++				ValidAndInvalidClassifier.fromString("!linux,!osx"), true);
+ 		for (String current : retrieveVersions) {
+ 			System.out.println(current);
+ 			assertFalse(current.endsWith("linux.tgz"));
+@@ -77,7 +76,7 @@
+ 	public void testWithNotExistentQualifier() throws VersionReaderException {
+ 		NexusLuceneSearchService s = new NexusLuceneSearchService("https://artifacts.alfresco.com/nexus/");
+ 		List<String> retrieveVersions = s.retrieveVersions("", "org.apache.tomcat", "tomcat", "tgz",
+-				ValidAndInvalidClassifier.fromString("foobar"));
++				ValidAndInvalidClassifier.fromString("foobar"), true);
+ 		for (String current : retrieveVersions) {
+ 			System.out.println(current);
+ 		}
+Index: src/test/resources/response.json
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- src/test/resources/response.json	(revision 4998e97d4a49ddb4700c6dc0d95927c72017784a)
++++ src/test/resources/response.json	(date 1589736057363)
+@@ -1,1 +1,41 @@
+-{"responseHeader":{"status":0,"QTime":0,"params":{"fl":"id,g,a,v,p,ec,timestamp,tags","sort":"score desc,timestamp desc,g asc,a asc,v desc","indent":"off","q":"g:\"org.apache.tomcat\" AND a:\"tomcat\" AND v:\"8.5.8\"","core":"gav","wt":"json","rows":"20","version":"2.2"}},"response":{"numFound":1,"start":0,"docs":[{"id":"org.apache.tomcat:tomcat:8.5.8","g":"org.apache.tomcat","a":"tomcat","v":"8.5.8","p":"pom","timestamp":1478209144000,"tags":["binary","tomcat","apache","distribution"],"ec":[".zip",".tar.gz",".pom"]}]}}
+\ No newline at end of file
++{
++  "responseHeader": {
++    "status": 0,
++    "QTime": 0,
++    "params": {
++      "fl": "id,g,a,v,p,ec,timestamp,tags",
++      "sort": "score desc,timestamp desc,g asc,a asc,v desc",
++      "indent": "off",
++      "q": "g:\"org.apache.tomcat\" AND a:\"tomcat\" AND v:\"8.5.8\"",
++      "core": "gav",
++      "wt": "json",
++      "rows": "20",
++      "version": "2.2"
++    }
++  },
++  "response": {
++    "numFound": 1,
++    "start": 0,
++    "docs": [
++      {
++        "id": "org.apache.tomcat:tomcat:8.5.8",
++        "g": "org.apache.tomcat",
++        "a": "tomcat",
++        "v": "8.5.8",
++        "p": "pom",
++        "timestamp": 1478209144000,
++        "tags": [
++          "binary",
++          "tomcat",
++          "apache",
++          "distribution"
++        ],
++        "ec": [
++          ".zip",
++          ".tar.gz",
++          ".pom"
++        ]
++      }
++    ]
++  }
++}
+\ No newline at end of file
+Index: src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/AbstractMavenArtifactDescriptorImpl.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/AbstractMavenArtifactDescriptorImpl.java	(revision 4998e97d4a49ddb4700c6dc0d95927c72017784a)
++++ src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/AbstractMavenArtifactDescriptorImpl.java	(date 1589744294641)
+@@ -1,13 +1,12 @@
+ package org.jenkinsci.plugins.maven_artifact_choicelistprovider;
+ 
+-import java.util.Map;
+-
+-import org.apache.commons.lang.StringUtils;
+-import org.kohsuke.stapler.QueryParameter;
+-
+ import hudson.model.Descriptor;
+ import hudson.util.FormValidation;
+ import jp.ikedam.jenkins.plugins.extensible_choice_parameter.ChoiceListProvider;
++import org.apache.commons.lang.StringUtils;
++import org.kohsuke.stapler.QueryParameter;
++
++import java.util.List;
+ 
+ /**
+  * 
+@@ -49,19 +48,19 @@
+     }
+ 
+     public FormValidation performTest(final IVersionReader pService, @QueryParameter String repositoryId, @QueryParameter String groupId, @QueryParameter String artifactId,
+-            @QueryParameter String packaging, @QueryParameter String classifier, @QueryParameter boolean reverseOrder) {
++            @QueryParameter String packaging, @QueryParameter String classifier, @QueryParameter boolean reverseOrder, @QueryParameter boolean includeRawAssets) {
+         if (StringUtils.isEmpty(packaging) && !StringUtils.isEmpty(classifier)) {
+             return FormValidation
+                     .error("You have choosen an empty Packaging configuration but have configured a Classifier. Please either define a Packaging value or remove the Classifier");
+         }
+ 
+         try {
+-            final Map<String, String> entriesFromURL = wrapTestConnection(pService, repositoryId, groupId, artifactId, packaging, classifier, reverseOrder);
++            final List<String> entriesFromURL = wrapTestConnection(pService, repositoryId, groupId, artifactId, packaging, classifier, reverseOrder, includeRawAssets);
+ 
+             if (entriesFromURL.isEmpty()) {
+                 return FormValidation.ok("(Working, but no Entries found)");
+             }
+-            return FormValidation.ok(StringUtils.join(entriesFromURL.values(), '\n'));
++            return FormValidation.ok(StringUtils.join(entriesFromURL, '\n'));
+         } catch (Exception e) {
+             return FormValidation.error("error reading versions from url:" + e.getMessage());
+         }
+@@ -88,7 +87,7 @@
+      *            TBD
+      * @return the list of found items.
+      */
+-    protected abstract Map<String, String> wrapTestConnection(IVersionReader service, String repositoryId, String groupId, String artifactId, String packaging, String classifier,
+-            boolean reverseOrder);
++    protected abstract List<String> wrapTestConnection(IVersionReader service, String repositoryId, String groupId, String artifactId, String packaging, String classifier,
++                                                       boolean reverseOrder, boolean includeRawAssets);
+ 
+ }
+Index: src/test/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/central/MavenCentralSearchServiceTest.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- src/test/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/central/MavenCentralSearchServiceTest.java	(revision 4998e97d4a49ddb4700c6dc0d95927c72017784a)
++++ src/test/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/central/MavenCentralSearchServiceTest.java	(date 1589744294595)
+@@ -1,12 +1,12 @@
+ package org.jenkinsci.plugins.maven_artifact_choicelistprovider.central;
+ 
+-import java.util.List;
+-
+ import org.jenkinsci.plugins.maven_artifact_choicelistprovider.ValidAndInvalidClassifier;
+ import org.jenkinsci.plugins.maven_artifact_choicelistprovider.VersionReaderException;
+ import org.junit.After;
+ import org.junit.Test;
+ 
++import java.util.List;
++
+ public class MavenCentralSearchServiceTest {
+ 
+ 	@After
+@@ -19,7 +19,7 @@
+ 		MavenCentralSearchService t = new MavenCentralSearchService();
+ 		try {
+ 			List<String> retrieveVersions = t.retrieveVersions("", "org.apache.tomcat", "tomcat", ".tar.gz",
+-					ValidAndInvalidClassifier.getDefault());
++					ValidAndInvalidClassifier.getDefault(), true);
+ 			System.out.println(retrieveVersions.size());
+ 			for (String current : retrieveVersions) {
+ 				System.out.println(current);
+Index: src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/nexus/NexusLuceneSearchService.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/nexus/NexusLuceneSearchService.java	(revision 4998e97d4a49ddb4700c6dc0d95927c72017784a)
++++ src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/nexus/NexusLuceneSearchService.java	(date 1589744294612)
+@@ -1,12 +1,5 @@
+ package org.jenkinsci.plugins.maven_artifact_choicelistprovider.nexus;
+ 
+-import java.util.LinkedHashSet;
+-import java.util.Set;
+-import java.util.logging.Logger;
+-
+-import javax.ws.rs.core.MediaType;
+-import javax.ws.rs.core.MultivaluedMap;
+-
+ import org.jenkinsci.plugins.maven_artifact_choicelistprovider.AbstractRESTfulVersionReader;
+ import org.jenkinsci.plugins.maven_artifact_choicelistprovider.IVersionReader;
+ import org.jenkinsci.plugins.maven_artifact_choicelistprovider.ValidAndInvalidClassifier;
+@@ -14,6 +7,12 @@
+ import org.sonatype.nexus.rest.model.NexusNGArtifactHit;
+ import org.sonatype.nexus.rest.model.NexusNGArtifactLink;
+ 
++import javax.ws.rs.core.MediaType;
++import javax.ws.rs.core.MultivaluedMap;
++import java.util.LinkedHashSet;
++import java.util.Set;
++import java.util.logging.Logger;
++
+ public class NexusLuceneSearchService extends AbstractRESTfulVersionReader implements IVersionReader {
+ 
+     private static final String LUCENE_SEARCH_SERVICE_URI = "service/local/lucene/search";
+@@ -37,7 +36,7 @@
+      * https://repository.sonatype.org/nexus-indexer-lucene-plugin/default/docs/path__lucene_search.html
+      */
+     @Override
+-    public Set<String> callService(final String pRepositoryId, final String pGroupId, final String pArtifactId, final String pPackaging, final ValidAndInvalidClassifier pClassifier) {
++    public Set<String> callService(final String pRepositoryId, final String pGroupId, final String pArtifactId, final String pPackaging, final ValidAndInvalidClassifier pClassifier, boolean includeRawAssets) {
+ 
+         final MultivaluedMap<String, String> requestParams = new StandardRESTfulParameterBuilder().create(pRepositoryId, pGroupId, pArtifactId, pPackaging, pClassifier);
+ 
+Index: src/test/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/nexus3/Nexus3RestApiSearchServiceTest.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- src/test/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/nexus3/Nexus3RestApiSearchServiceTest.java	(revision 4998e97d4a49ddb4700c6dc0d95927c72017784a)
++++ src/test/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/nexus3/Nexus3RestApiSearchServiceTest.java	(date 1589744294627)
+@@ -1,13 +1,12 @@
+ package org.jenkinsci.plugins.maven_artifact_choicelistprovider.nexus3;
+ 
+-import java.util.List;
+-
++import junit.framework.TestCase;
+ import org.jenkinsci.plugins.maven_artifact_choicelistprovider.ValidAndInvalidClassifier;
+ import org.jenkinsci.plugins.maven_artifact_choicelistprovider.VersionReaderException;
+ import org.junit.After;
+ import org.junit.Test;
+ 
+-import junit.framework.TestCase;
++import java.util.List;
+ 
+ public class Nexus3RestApiSearchServiceTest extends TestCase {
+ 
+@@ -22,7 +21,7 @@
+         s.setUserName("TBD");
+         s.setUserPassword("TBD");
+         List<String> retrieveVersions = s.retrieveVersions("maven-central", "org.apache.ant", "ant", "",
+-                ValidAndInvalidClassifier.getDefault());
++                ValidAndInvalidClassifier.getDefault(), true);
+         for (String current : retrieveVersions) {
+             System.out.println(current);
+         }
+Index: pom.xml
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- pom.xml	(revision 4998e97d4a49ddb4700c6dc0d95927c72017784a)
++++ pom.xml	(date 1589678794612)
+@@ -50,6 +50,12 @@
+             <version>1.6.0</version>
+         </dependency>
+ 
++        <dependency>
++            <groupId>javax.xml.bind</groupId>
++            <artifactId>jaxb-api</artifactId>
++            <version>2.3.1</version>
++        </dependency>
++
+         <!-- All JaxWS/RS, Jersey and Glassfish Dependencies to allow RESTful Service calls -->
+         <dependency>
+             <groupId>javax.ws.rs</groupId>
+Index: src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/nexus/NexusChoiceListProvider.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/nexus/NexusChoiceListProvider.java	(revision 4998e97d4a49ddb4700c6dc0d95927c72017784a)
++++ src/main/java/org/jenkinsci/plugins/maven_artifact_choicelistprovider/nexus/NexusChoiceListProvider.java	(date 1589744294605)
+@@ -1,35 +1,27 @@
+ package org.jenkinsci.plugins.maven_artifact_choicelistprovider.nexus;
+ 
+-import java.util.Collections;
+-import java.util.Map;
+-import java.util.logging.Logger;
+-
+-import javax.ws.rs.POST;
+-
+-import org.apache.commons.lang.StringUtils;
+-import org.jenkinsci.plugins.maven_artifact_choicelistprovider.AbstractMavenArtifactChoiceListProvider;
+-import org.jenkinsci.plugins.maven_artifact_choicelistprovider.AbstractMavenArtifactDescriptorImpl;
+-import org.jenkinsci.plugins.maven_artifact_choicelistprovider.IVersionReader;
+-import org.kohsuke.stapler.AncestorInPath;
+-import org.kohsuke.stapler.DataBoundConstructor;
+-import org.kohsuke.stapler.DataBoundSetter;
+-import org.kohsuke.stapler.QueryParameter;
+-import org.kohsuke.stapler.StaplerRequest;
+-
+ import com.cloudbees.plugins.credentials.CredentialsMatchers;
+ import com.cloudbees.plugins.credentials.common.StandardListBoxModel;
+ import com.cloudbees.plugins.credentials.common.StandardUsernamePasswordCredentials;
+ import com.cloudbees.plugins.credentials.domains.DomainRequirement;
+ import com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl;
+-
+ import hudson.Extension;
+ import hudson.model.Item;
+ import hudson.model.Job;
+ import hudson.security.ACL;
+ import hudson.util.FormValidation;
+ import hudson.util.ListBoxModel;
+-import jenkins.model.Jenkins;
+ import net.sf.json.JSONObject;
++import org.apache.commons.lang.StringUtils;
++import org.jenkinsci.plugins.maven_artifact_choicelistprovider.AbstractMavenArtifactChoiceListProvider;
++import org.jenkinsci.plugins.maven_artifact_choicelistprovider.AbstractMavenArtifactDescriptorImpl;
++import org.jenkinsci.plugins.maven_artifact_choicelistprovider.IVersionReader;
++import org.kohsuke.stapler.*;
++
++import javax.ws.rs.POST;
++import java.util.Collections;
++import java.util.List;
++import java.util.logging.Logger;
+ 
+ public class NexusChoiceListProvider extends AbstractMavenArtifactChoiceListProvider {
+ 
+@@ -84,7 +76,7 @@
+         @POST
+         public FormValidation doTest(@AncestorInPath Item pItem, @QueryParameter String url, @QueryParameter String credentialsId, @QueryParameter String repositoryId,
+                 @QueryParameter String groupId, @QueryParameter String artifactId, @QueryParameter String packaging, @QueryParameter String classifier,
+-                @QueryParameter boolean reverseOrder) {
++                @QueryParameter boolean reverseOrder, @QueryParameter boolean includeRawAssets) {
+ 
+             // SECURITY-1022
+             pItem.checkPermission(Job.CONFIGURE);
+@@ -96,13 +88,13 @@
+             if (c != null) {
+                 service.setCredentials(c.getUsername(), c.getPassword().getPlainText());
+             }
+-            return super.performTest(service, repositoryId, groupId, artifactId, packaging, classifier, reverseOrder);
++            return super.performTest(service, repositoryId, groupId, artifactId, packaging, classifier, reverseOrder, includeRawAssets);
+         }
+ 
+         @Override
+-        protected Map<String, String> wrapTestConnection(IVersionReader pService, String pRepositoryId, String pGroupId, String pArtifactId, String pPackaging, String pClassifier,
+-                boolean pReverseOrder) {
+-            return readURL(pService, pRepositoryId, pGroupId, pArtifactId, pPackaging, pClassifier, pReverseOrder);
++        protected List<String> wrapTestConnection(IVersionReader pService, String pRepositoryId, String pGroupId, String pArtifactId, String pPackaging, String pClassifier,
++                                                  boolean pReverseOrder, boolean includeRawAssets) {
++            return readURL(pService, pRepositoryId, pGroupId, pArtifactId, pPackaging, pClassifier, pReverseOrder, includeRawAssets);
+         }
+ 
+         public FormValidation doCheckUrl(@QueryParameter String url) {
+Index: src/main/resources/org/jenkinsci/plugins/maven_artifact_choicelistprovider/nexus3/Nexus3ChoiceListProvider/help-includeRawAssets.html
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- src/main/resources/org/jenkinsci/plugins/maven_artifact_choicelistprovider/nexus3/Nexus3ChoiceListProvider/help-includeRawAssets.html	(date 1589682452565)
++++ src/main/resources/org/jenkinsci/plugins/maven_artifact_choicelistprovider/nexus3/Nexus3ChoiceListProvider/help-includeRawAssets.html	(date 1589682452565)
+@@ -0,0 +1,3 @@
++<div>
++If we should list the raw files, or use the Maven versions. For example raw assets may list several -SNAPSHOT builds whereas not including them will only list 1 -SNAPSHOT build.
++</div>
